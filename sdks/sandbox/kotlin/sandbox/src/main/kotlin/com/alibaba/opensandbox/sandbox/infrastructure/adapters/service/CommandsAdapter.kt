@@ -197,7 +197,10 @@ internal class CommandsAdapter(
         return sessionAdapter.createSession(cwd)
     }
 
-    override fun runInSession(sessionId: String, request: RunInSessionRequest): Execution {
+    override fun runInSession(
+        sessionId: String,
+        request: RunInSessionRequest,
+    ): Execution {
         return sessionAdapter.runInSession(sessionId, request)
     }
 

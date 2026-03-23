@@ -17,7 +17,11 @@
 package com.alibaba.opensandbox.sandbox.infrastructure.adapters.service
 
 import com.alibaba.opensandbox.sandbox.HttpClientProvider
+import com.alibaba.opensandbox.sandbox.api.models.execd.EventNode
 import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError.Companion.UNEXPECTED_RESPONSE
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.RunInSessionRequest
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
@@ -26,14 +30,10 @@ import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.Executi
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.jsonParser
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.parseSandboxError
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxException
-import com.alibaba.opensandbox.sandbox.api.models.execd.EventNode
-import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
-import okhttp3.Headers.Companion.toHeaders
-import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError
-import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError.Companion.UNEXPECTED_RESPONSE
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import okhttp3.Headers.Companion.toHeaders
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -86,12 +86,13 @@ internal class SessionAdapter(
                         requestId = response.header("X-Request-ID"),
                     )
                 }
-                val responseBody = response.body?.string() ?: throw SandboxApiException(
-                    message = "create_session returned empty body",
-                    statusCode = response.code,
-                    error = SandboxError(UNEXPECTED_RESPONSE),
-                    requestId = response.header("X-Request-ID"),
-                )
+                val responseBody =
+                    response.body?.string() ?: throw SandboxApiException(
+                        message = "create_session returned empty body",
+                        statusCode = response.code,
+                        error = SandboxError(UNEXPECTED_RESPONSE),
+                        requestId = response.header("X-Request-ID"),
+                    )
                 val parsed = jsonParser.decodeFromString<CreateSessionResponse>(responseBody)
                 return parsed.sessionId
             }
@@ -101,7 +102,10 @@ internal class SessionAdapter(
         }
     }
 
-    override fun runInSession(sessionId: String, request: RunInSessionRequest): Execution {
+    override fun runInSession(
+        sessionId: String,
+        request: RunInSessionRequest,
+    ): Execution {
         if (sessionId.isBlank()) {
             throw InvalidArgumentException("session_id cannot be empty")
         }

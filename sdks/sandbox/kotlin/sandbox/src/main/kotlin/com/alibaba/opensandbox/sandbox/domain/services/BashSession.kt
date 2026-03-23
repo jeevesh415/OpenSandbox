@@ -45,7 +45,10 @@ internal interface BashSession {
      * @param request Code to execute and optional cwd/timeout/handlers
      * @return Execution result with stdout/stderr and completion status
      */
-    fun runInSession(sessionId: String, request: RunInSessionRequest): Execution
+    fun runInSession(
+        sessionId: String,
+        request: RunInSessionRequest,
+    ): Execution
 
     /**
      * Deletes a bash session and releases resources.

@@ -100,7 +100,10 @@ interface Commands {
      * @param request Code to execute and optional cwd/timeout/handlers
      * @return Execution result with stdout/stderr and completion status
      */
-    fun runInSession(sessionId: String, request: RunInSessionRequest): Execution
+    fun runInSession(
+        sessionId: String,
+        request: RunInSessionRequest,
+    ): Execution
 
     /**
      * Convenience overload for running code in a session with minimal options.
