@@ -32,8 +32,6 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/log"
 )
 
-var errPTYSessionNotSupported = errors.New("pty session not supported")
-
 // PTYSession is the public interface for an interactive PTY/pipe session.
 // The concrete implementation (*ptySession) is unexported; callers outside
 // this package must use this interface.

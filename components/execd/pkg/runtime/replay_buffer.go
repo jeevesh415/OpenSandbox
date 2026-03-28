@@ -76,11 +76,6 @@ func (r *replayBuffer) Total() int64 {
 	return r.total
 }
 
-// readFrom is the unexported thin wrapper used inside the runtime package.
-func (r *replayBuffer) readFrom(offset int64) ([]byte, int64) {
-	return r.ReadFrom(offset)
-}
-
 // ReadFrom returns a snapshot of all bytes starting from the given absolute byte offset.
 //
 // Returns (data, actualOffset) where actualOffset is the offset of the first returned byte:

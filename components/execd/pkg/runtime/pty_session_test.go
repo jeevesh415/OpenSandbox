@@ -34,7 +34,7 @@ func replayContains(t *testing.T, s *ptySession, substr string, timeout time.Dur
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		data, _ := s.replay.readFrom(0)
+		data, _ := s.replay.ReadFrom(0)
 		if strings.Contains(string(data), substr) {
 			return true
 		}
@@ -124,7 +124,7 @@ func TestPTYSession_ANSISequences(t *testing.T) {
 		"expected 'GREEN' in replay buffer")
 
 	// PTY mode should propagate ESC bytes verbatim.
-	data, _ := s.replay.readFrom(0)
+	data, _ := s.replay.ReadFrom(0)
 	assert.Contains(t, string(data), "\x1b", "expected ESC bytes in PTY output")
 }
 
@@ -187,12 +187,12 @@ func TestPTYSession_ReconnectReplay(t *testing.T) {
 	require.True(t, replayContains(t, s, "first_output", 5*time.Second),
 		"expected 'first_output' in replay buffer")
 
-	snapshot, snapshotOff := s.replay.readFrom(0)
+	snapshot, snapshotOff := s.replay.ReadFrom(0)
 	detach1()
 	time.Sleep(50 * time.Millisecond)
 
 	// Reconnect — replay from offset 0 should return the same bytes we snapshotted.
-	replay, replayOff := s.replay.readFrom(0)
+	replay, replayOff := s.replay.ReadFrom(0)
 	require.Equal(t, snapshotOff, replayOff)
 	// The new snapshot may be larger (more output arrived), but must contain snapshot.
 	require.True(t, strings.HasPrefix(string(replay), string(snapshot)) || len(replay) >= len(snapshot),
@@ -212,7 +212,7 @@ func TestPTYSession_ReconnectReplay(t *testing.T) {
 		"expected 'second_output' in replay buffer")
 
 	// Delta replay from offset-after-first should contain only new bytes.
-	newData, _ := s.replay.readFrom(offsetAfterFirst)
+	newData, _ := s.replay.ReadFrom(offsetAfterFirst)
 	require.True(t, strings.Contains(string(newData), "second_output"),
 		"delta replay should contain 'second_output', got %q", string(newData))
 }

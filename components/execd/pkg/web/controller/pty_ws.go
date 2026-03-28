@@ -27,6 +27,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/alibaba/opensandbox/execd/pkg/log"
+	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
@@ -186,89 +187,152 @@ func PTYSessionWebSocket(ctx *gin.Context) {
 	}
 
 	// 10a. RFC 6455 binary ping goroutine (30 s interval).
-	go func() {
-		t := time.NewTicker(wsPingInterval)
-		defer t.Stop()
-		for {
-			select {
-			case <-cancelCh:
-				return
-			case <-t.C:
-				connMu.Lock()
-				_ = conn.SetWriteDeadline(time.Now().Add(wsWriteDeadline))
-				pingErr := conn.WriteMessage(websocket.PingMessage, nil)
-				connMu.Unlock()
-				if pingErr != nil {
-					cancelOnce()
-					return
-				}
-			}
-		}
-	}()
-
-	// streamPump reads raw chunks from r and sends them as binary frames over WS.
-	streamPump := func(r io.Reader, typeByte byte, name string) {
-		defer pumpWg.Done()
-		const chunkSize = 32 * 1024
-		frame := make([]byte, 1+chunkSize) // single allocation for session lifetime
-		frame[0] = typeByte
-		for {
-			select {
-			case <-cancelCh:
-				return
-			default:
-			}
-			n, readErr := r.Read(frame[1:])
-			if n > 0 {
-				connMu.Lock()
-				_ = conn.SetWriteDeadline(time.Now().Add(wsWriteDeadline))
-				writeErr := conn.WriteMessage(websocket.BinaryMessage, frame[:1+n])
-				connMu.Unlock()
-				if writeErr != nil {
-					log.Warning("pty ws write %s for session %s: %v", name, id, writeErr)
-					cancelOnce()
-					return
-				}
-			}
-			if readErr != nil {
-				// io.EOF or io.ErrClosedPipe when detach() closes the PipeWriter.
-				return
-			}
-		}
-	}
+	go ptyPingLoop(conn, &connMu, cancelCh, cancelOnce)
 
 	// 10b. Launch stdout pump.
 	pumpWg.Add(1)
-	go streamPump(stdoutR, model.BinStdout, "stdout")
+	go ptyStreamPump(stdoutR, model.BinStdout, "stdout", id, conn, &connMu, &pumpWg, cancelCh, cancelOnce)
 
 	// 10c. Launch stderr pump (pipe mode only).
 	if stderrR != nil {
 		pumpWg.Add(1)
-		go streamPump(stderrR, model.BinStderr, "stderr")
+		go ptyStreamPump(stderrR, model.BinStderr, "stderr", id, conn, &connMu, &pumpWg, cancelCh, cancelOnce)
 	}
 
 	// 10d. Exit watcher: waits for the process to exit, then sends exit frame
 	// and closes the WS connection immediately (unblocks ReadJSON in the read loop).
-	go func() {
-		doneCh := session.Done()
-		if doneCh == nil {
-			return
-		}
-		select {
-		case <-doneCh:
-		case <-cancelCh:
-			return
-		}
-		exitCode := session.ExitCode()
-		_ = writeJSON(model.ServerFrame{
-			Type:     "exit",
-			ExitCode: &exitCode,
-		})
-		closeConn(websocket.CloseNormalClosure, "process exited")
-		cancelOnce()
-	}()
+	go ptyExitWatcher(session, writeJSON, closeConn, cancelCh, cancelOnce)
 
 	// 11. Client read loop.
+	ptyClientReadLoop(conn, session, id, writeJSON, cancelCh, cancelOnce)
+}
+
+// ptyPingLoop sends periodic WebSocket pings until cancelCh is closed.
+func ptyPingLoop(conn *websocket.Conn, connMu *sync.Mutex, cancelCh <-chan struct{}, cancelOnce func()) {
+	t := time.NewTicker(wsPingInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-cancelCh:
+			return
+		case <-t.C:
+			connMu.Lock()
+			_ = conn.SetWriteDeadline(time.Now().Add(wsWriteDeadline))
+			pingErr := conn.WriteMessage(websocket.PingMessage, nil)
+			connMu.Unlock()
+			if pingErr != nil {
+				cancelOnce()
+				return
+			}
+		}
+	}
+}
+
+// ptyStreamPump reads raw chunks from r and sends them as binary frames over WS.
+func ptyStreamPump(r io.Reader, typeByte byte, name, id string, conn *websocket.Conn, connMu *sync.Mutex, pumpWg *sync.WaitGroup, cancelCh <-chan struct{}, cancelOnce func()) {
+	defer pumpWg.Done()
+	const chunkSize = 32 * 1024
+	frame := make([]byte, 1+chunkSize) // single allocation for session lifetime
+	frame[0] = typeByte
+	for {
+		select {
+		case <-cancelCh:
+			return
+		default:
+		}
+		n, readErr := r.Read(frame[1:])
+		if n > 0 {
+			connMu.Lock()
+			_ = conn.SetWriteDeadline(time.Now().Add(wsWriteDeadline))
+			writeErr := conn.WriteMessage(websocket.BinaryMessage, frame[:1+n])
+			connMu.Unlock()
+			if writeErr != nil {
+				log.Warning("pty ws write %s for session %s: %v", name, id, writeErr)
+				cancelOnce()
+				return
+			}
+		}
+		if readErr != nil {
+			// io.EOF or io.ErrClosedPipe when detach() closes the PipeWriter.
+			return
+		}
+	}
+}
+
+// ptyExitWatcher waits for the session process to exit, then sends an exit frame
+// and closes the WS connection.
+func ptyExitWatcher(session runtime.PTYSession, writeJSON func(any) error, closeConn func(int, string), cancelCh <-chan struct{}, cancelOnce func()) {
+	doneCh := session.Done()
+	if doneCh == nil {
+		return
+	}
+	select {
+	case <-doneCh:
+	case <-cancelCh:
+		return
+	}
+	exitCode := session.ExitCode()
+	_ = writeJSON(model.ServerFrame{
+		Type:     "exit",
+		ExitCode: &exitCode,
+	})
+	closeConn(websocket.CloseNormalClosure, "process exited")
+	cancelOnce()
+}
+
+// ptyHandleBinaryMsg processes an incoming binary WebSocket frame from the client.
+// Returns true if the connection should be terminated.
+func ptyHandleBinaryMsg(session runtime.PTYSession, data []byte, writeJSON func(any) error, cancelOnce func()) bool {
+	if len(data) == 0 {
+		return false
+	}
+	if data[0] != model.BinStdin {
+		return false // only stdin expected C→S
+	}
+	if _, writeErr := session.WriteStdin(data[1:]); writeErr != nil {
+		_ = writeJSON(model.ServerFrame{Type: "error", Code: model.WSErrCodeStdinWriteFailed,
+			Error: writeErr.Error()})
+		cancelOnce()
+		return true
+	}
+	return false
+}
+
+// ptyHandleTextMsg processes an incoming text WebSocket frame from the client.
+// Returns true if the connection should be terminated.
+func ptyHandleTextMsg(session runtime.PTYSession, id string, data []byte, writeJSON func(any) error, cancelOnce func()) bool {
+	var frame model.ClientFrame
+	if json.Unmarshal(data, &frame) != nil {
+		return false
+	}
+	switch frame.Type {
+	case "stdin":
+		// wscat / debug fallback: plain UTF-8 text, no base64.
+		if _, writeErr := session.WriteStdin([]byte(frame.Data)); writeErr != nil {
+			_ = writeJSON(model.ServerFrame{Type: "error", Code: model.WSErrCodeStdinWriteFailed,
+				Error: writeErr.Error()})
+			cancelOnce()
+			return true
+		}
+	case "signal":
+		session.SendSignal(frame.Signal)
+	case "resize":
+		if frame.Cols > 0 && frame.Rows > 0 {
+			if resErr := session.ResizePTY(uint16(frame.Cols), uint16(frame.Rows)); resErr != nil {
+				log.Warning("pty resize session %s: %v", id, resErr)
+			}
+		}
+	case "ping":
+		_ = writeJSON(model.ServerFrame{Type: "pong"})
+	default:
+		_ = writeJSON(model.ServerFrame{Type: "error", Code: model.WSErrCodeInvalidFrame,
+			Error: fmt.Sprintf("unknown frame type %q", frame.Type)})
+	}
+	return false
+}
+
+// ptyClientReadLoop processes incoming WebSocket messages until the connection closes.
+func ptyClientReadLoop(conn *websocket.Conn, session runtime.PTYSession, id string, writeJSON func(any) error, cancelCh <-chan struct{}, cancelOnce func()) {
 	for {
 		select {
 		case <-cancelCh:
@@ -276,8 +340,8 @@ func PTYSessionWebSocket(ctx *gin.Context) {
 		default:
 		}
 
-		msgType, data, err2 := conn.ReadMessage()
-		if err2 != nil {
+		msgType, data, err := conn.ReadMessage()
+		if err != nil {
 			cancelOnce()
 			return
 		}
@@ -286,48 +350,13 @@ func PTYSessionWebSocket(ctx *gin.Context) {
 		_ = conn.SetReadDeadline(time.Now().Add(wsReadDeadline))
 
 		switch msgType {
-
 		case websocket.BinaryMessage:
-			if len(data) == 0 {
-				continue
-			}
-			if data[0] != model.BinStdin {
-				continue // only stdin expected C→S
-			}
-			if _, writeErr := session.WriteStdin(data[1:]); writeErr != nil {
-				_ = writeJSON(model.ServerFrame{Type: "error", Code: model.WSErrCodeStdinWriteFailed,
-					Error: writeErr.Error()})
-				cancelOnce()
+			if ptyHandleBinaryMsg(session, data, writeJSON, cancelOnce) {
 				return
 			}
-
 		case websocket.TextMessage:
-			var frame model.ClientFrame
-			if json.Unmarshal(data, &frame) != nil {
-				continue
-			}
-			switch frame.Type {
-			case "stdin":
-				// wscat / debug fallback: plain UTF-8 text, no base64.
-				if _, writeErr := session.WriteStdin([]byte(frame.Data)); writeErr != nil {
-					_ = writeJSON(model.ServerFrame{Type: "error", Code: model.WSErrCodeStdinWriteFailed,
-						Error: writeErr.Error()})
-					cancelOnce()
-					return
-				}
-			case "signal":
-				session.SendSignal(frame.Signal)
-			case "resize":
-				if frame.Cols > 0 && frame.Rows > 0 {
-					if resErr := session.ResizePTY(uint16(frame.Cols), uint16(frame.Rows)); resErr != nil {
-						log.Warning("pty resize session %s: %v", id, resErr)
-					}
-				}
-			case "ping":
-				_ = writeJSON(model.ServerFrame{Type: "pong"})
-			default:
-				_ = writeJSON(model.ServerFrame{Type: "error", Code: model.WSErrCodeInvalidFrame,
-					Error: fmt.Sprintf("unknown frame type %q", frame.Type)})
+			if ptyHandleTextMsg(session, id, data, writeJSON, cancelOnce) {
+				return
 			}
 		}
 	}

@@ -71,19 +71,19 @@ func (c *Controller) GetPTYSessionStatus(id string) (bool, int64, error) { //nol
 
 // Method stubs so the controller layer can call them without build-tag guards.
 
-func (s *ptySession) LockWS() bool                                     { return false }
-func (s *ptySession) UnlockWS()                                         {}
-func (s *ptySession) IsRunning() bool                                   { return false }
-func (s *ptySession) IsPTY() bool                                       { return false }
-func (s *ptySession) ExitCode() int                                     { return -1 }
-func (s *ptySession) Done() <-chan struct{}                              { return nil }
-func (s *ptySession) ReplayBuffer() *replayBuffer                       { return nil }
-func (s *ptySession) StartPTY() error                                   { return errPTYSessionNotSupported }
-func (s *ptySession) StartPipe() error                                  { return errPTYSessionNotSupported }
-func (s *ptySession) WriteStdin(_ []byte) (int, error)                  { return 0, errPTYSessionNotSupported }
+func (s *ptySession) LockWS() bool                                 { return false }
+func (s *ptySession) UnlockWS()                                    {}
+func (s *ptySession) IsRunning() bool                              { return false }
+func (s *ptySession) IsPTY() bool                                  { return false }
+func (s *ptySession) ExitCode() int                                { return -1 }
+func (s *ptySession) Done() <-chan struct{}                        { return nil }
+func (s *ptySession) ReplayBuffer() *replayBuffer                  { return nil }
+func (s *ptySession) StartPTY() error                              { return errPTYSessionNotSupported }
+func (s *ptySession) StartPipe() error                             { return errPTYSessionNotSupported }
+func (s *ptySession) WriteStdin(_ []byte) (int, error)             { return 0, errPTYSessionNotSupported }
 func (s *ptySession) AttachOutput() (io.Reader, io.Reader, func()) { return nil, nil, func() {} }
 func (s *ptySession) AttachOutputWithSnapshot(_ int64) (io.Reader, io.Reader, func(), []byte, int64) {
 	return nil, nil, func() {}, nil, 0
 }
-func (s *ptySession) SendSignal(_ string)                               {}
-func (s *ptySession) ResizePTY(_, _ uint16) error                       { return nil }
+func (s *ptySession) SendSignal(_ string)         {}
+func (s *ptySession) ResizePTY(_, _ uint16) error { return nil }

@@ -27,7 +27,7 @@ func TestReplayBuffer_BasicWriteRead(t *testing.T) {
 	rb.write([]byte("hello"))
 	rb.write([]byte(" world"))
 
-	data, off := rb.readFrom(0)
+	data, off := rb.ReadFrom(0)
 	require.Equal(t, int64(0), off)
 	require.Equal(t, []byte("hello world"), data)
 	require.Equal(t, int64(11), rb.Total())
@@ -37,7 +37,7 @@ func TestReplayBuffer_ReadFromMiddle(t *testing.T) {
 	rb := newReplayBuffer()
 	rb.write([]byte("abcde"))
 
-	data, off := rb.readFrom(2)
+	data, off := rb.ReadFrom(2)
 	require.Equal(t, int64(2), off)
 	require.Equal(t, []byte("cde"), data)
 }
@@ -46,7 +46,7 @@ func TestReplayBuffer_ReadFromCurrent(t *testing.T) {
 	rb := newReplayBuffer()
 	rb.write([]byte("abc"))
 
-	data, off := rb.readFrom(3)
+	data, off := rb.ReadFrom(3)
 	require.Nil(t, data, "should return nil when caught up")
 	require.Equal(t, int64(3), off)
 }
@@ -66,12 +66,12 @@ func TestReplayBuffer_CircularEviction(t *testing.T) {
 	require.Equal(t, int64(10), rb.Total())
 
 	// offset 0 should be clamped to oldest=2
-	data, off := rb.readFrom(0)
+	data, off := rb.ReadFrom(0)
 	require.Equal(t, int64(2), off)
 	require.Equal(t, []byte("cdefghij"), data)
 
 	// Read from offset 5 (within retained range)
-	data, off = rb.readFrom(5)
+	data, off = rb.ReadFrom(5)
 	require.Equal(t, int64(5), off)
 	require.Equal(t, []byte("fghij"), data)
 }
@@ -85,12 +85,12 @@ func TestReplayBuffer_LargeGap(t *testing.T) {
 	rb.write([]byte("ABCDEF"))
 
 	// Requesting from 0 should clamp to oldest=2
-	data, off := rb.readFrom(0)
+	data, off := rb.ReadFrom(0)
 	require.Equal(t, int64(2), off)
 	require.Equal(t, []byte("CDEF"), data)
 
 	// Requesting from 1 should also clamp to oldest=2
-	data, off = rb.readFrom(1)
+	data, off = rb.ReadFrom(1)
 	require.Equal(t, int64(2), off)
 	require.Equal(t, []byte("CDEF"), data)
 }
@@ -114,7 +114,7 @@ func TestReplayBuffer_Concurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for range 32 {
-				rb.readFrom(0)
+				rb.ReadFrom(0)
 				rb.Total()
 			}
 		}()
@@ -133,7 +133,7 @@ func TestReplayBuffer_ExactlyFull(t *testing.T) {
 	rb.write([]byte("1234"))
 	require.Equal(t, int64(4), rb.Total())
 
-	data, off := rb.readFrom(0)
+	data, off := rb.ReadFrom(0)
 	require.Equal(t, int64(0), off)
 	require.Equal(t, []byte("1234"), data)
 }
@@ -148,7 +148,7 @@ func TestReplayBuffer_WriteWrapsCorrectly(t *testing.T) {
 	// Write "EF" — evicts "AB", retained "CDEF"
 	rb.write([]byte("EF"))
 
-	data, off := rb.readFrom(0)
+	data, off := rb.ReadFrom(0)
 	require.Equal(t, int64(2), off, "offset should be clamped to oldest=2")
 	require.Equal(t, []byte("CDEF"), data)
 }
