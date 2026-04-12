@@ -549,11 +549,11 @@ func (r *BatchSandboxReconciler) updateStatus(batchSandbox *sandboxv1alpha1.Batc
 }
 
 // SetupWithManager sets up the controller with the Manager.
-func (r *BatchSandboxReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *BatchSandboxReconciler) SetupWithManager(mgr ctrl.Manager, maxConcurrentReconciles int) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&sandboxv1alpha1.BatchSandbox{}).
 		Named("batchsandbox").
 		Owns(&corev1.Pod{}).
-		WithOptions(controller.Options{MaxConcurrentReconciles: 32}).
+		WithOptions(controller.Options{MaxConcurrentReconciles: maxConcurrentReconciles}).
 		Complete(r)
 }
