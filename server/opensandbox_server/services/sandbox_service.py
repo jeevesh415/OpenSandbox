@@ -21,6 +21,7 @@ This module defines the abstract interface for sandbox services.
 
 from abc import ABC, abstractmethod
 import socket
+from typing import Optional
 from uuid import uuid4
 
 from opensandbox_server.api.schema import (
@@ -29,6 +30,7 @@ from opensandbox_server.api.schema import (
     Endpoint,
     ListSandboxesRequest,
     ListSandboxesResponse,
+    PatchSandboxMetadataRequest,
     RenewSandboxExpirationRequest,
     RenewSandboxExpirationResponse,
     Sandbox,
@@ -205,7 +207,51 @@ class SandboxService(ABC):
         """
         pass
 
-    # ------------------------------------------------------------------
+    @abstractmethod
+    def patch_sandbox_metadata(self, sandbox_id: str, patch: PatchSandboxMetadataRequest) -> Sandbox:
+        """Patch sandbox metadata via JSON Merge Patch (RFC 7396). Non-null adds/replaces, null deletes, absent keeps."""
+        pass
+
+    @staticmethod
+    def _is_system_label(key: str) -> bool:
+        return key.startswith("opensandbox.io/")
+
+    @staticmethod
+    def _apply_metadata_patch(labels: dict, patch: dict) -> dict:
+        """Apply JSON Merge Patch to labels: separate user metadata, merge, validate, rebuild."""
+        from fastapi import HTTPException
+        from opensandbox_server.services.validators import ensure_metadata_labels
+
+        for key in patch:
+            if SandboxService._is_system_label(key):
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "INVALID_METADATA_LABEL",
+                        "message": f"Metadata key '{key}' is reserved (opensandbox.io/ prefix).",
+                    },
+                )
+
+        # Validate only incoming patch values, not existing labels
+        patch_additions = {k: str(v) for k, v in patch.items() if v is not None}
+        if patch_additions:
+            ensure_metadata_labels(patch_additions)
+
+        current_metadata = {
+            k: v for k, v in labels.items() if not SandboxService._is_system_label(k)
+        }
+
+        for key, value in patch.items():
+            if value is None:
+                current_metadata.pop(key, None)
+            else:
+                current_metadata[key] = str(value)
+
+        new_labels = {k: v for k, v in labels.items() if SandboxService._is_system_label(k)}
+        for k, v in current_metadata.items():
+            new_labels[k] = str(v)
+        return new_labels
+
     # Diagnostics (DevOps)
     # ------------------------------------------------------------------
 
@@ -252,7 +298,8 @@ class SandboxService(ABC):
         pass
 
     @abstractmethod
-    def get_endpoint(self, sandbox_id: str, port: int, resolve_internal: bool = False) -> Endpoint:
+    def get_endpoint(self, sandbox_id: str, port: int, resolve_internal: bool = False,
+                     expires: Optional[int] = None) -> Endpoint:
         """
         Get sandbox access endpoint.
 
@@ -260,11 +307,15 @@ class SandboxService(ABC):
             sandbox_id: Unique sandbox identifier
             port: Port number where the service is listening inside the sandbox
             resolve_internal: If True, return the internal container IP (for proxy), ignoring router config.
+            expires: Unix epoch seconds for a signed route token. When provided, the
+                endpoint is wrapped in a cryptographically signed route per OSEP-0011.
+                Requires ingress gateway mode with secure_access keys configured.
 
         Returns:
             Endpoint: Public endpoint URL
 
         Raises:
-            HTTPException: If sandbox not found or endpoint not available
+            HTTPException: If sandbox not found, endpoint not available,
+                or signed routes are not supported by the runtime/configuration.
         """
         pass

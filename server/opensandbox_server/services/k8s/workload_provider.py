@@ -100,11 +100,11 @@ class WorkloadProvider(ABC):
     def delete_workload(self, sandbox_id: str, namespace: str) -> None:
         """
         Delete a workload resource.
-        
+
         Args:
             sandbox_id: Unique sandbox identifier
             namespace: Kubernetes namespace
-            
+
         Raises:
             ApiException: If deletion fails
         """
@@ -169,16 +169,56 @@ class WorkloadProvider(ABC):
     def get_endpoint_info(self, workload: Any, port: int, sandbox_id: str) -> Optional[Endpoint]:
         """
         Get endpoint information from workload.
-        
+
         Args:
             workload: Workload object
             port: Port number
             sandbox_id: Sandbox identifier for ingress-based endpoints
-            
+
         Returns:
             Endpoint object (including optional headers) or None if not available
         """
         pass
+
+    def pause_sandbox(self, sandbox_id: str, namespace: str) -> None:
+        """
+        Pause a running sandbox.
+
+        The provider validates the current state and signals the pause intent.
+        Raises NotImplementedError if the provider does not support pause.
+        Raises ValueError if the sandbox is in an invalid state for pause.
+        Raises Exception if the sandbox is not found or the API call fails.
+        """
+        raise NotImplementedError("Pause is not supported by this provider")
+
+    def resume_sandbox(self, sandbox_id: str, namespace: str) -> None:
+        """
+        Resume a paused sandbox.
+
+        The provider validates the current state and signals the resume intent.
+        Raises NotImplementedError if the provider does not support resume.
+        Raises ValueError if the sandbox is in an invalid state for resume.
+        Raises Exception if the sandbox is not found or the API call fails.
+        """
+        raise NotImplementedError("Resume is not supported by this provider")
+
+    def patch_labels(
+        self, name: str, namespace: str, labels: Dict[str, Optional[str]]
+    ) -> Dict[str, Any]:
+        """Patch workload metadata.labels via JSON merge patch.
+
+        A None value for a label key deletes that label per RFC 7396.
+        Returns the API server response (the patched workload).
+        """
+        body = {"metadata": {"labels": labels}}
+        return self.k8s_client.patch_custom_object(
+            group=self.group,
+            version=self.version,
+            namespace=namespace,
+            plural=self.plural,
+            name=name,
+            body=body,
+        )
 
     def supports_image_auth(self) -> bool:
         """

@@ -17,12 +17,19 @@ from pydantic import ValidationError
 
 from opensandbox_server.api.schema import (
     CreateSandboxRequest,
+    CreateSnapshotRequest,
     Host,
     ImageSpec,
+    ListSnapshotsRequest,
     OSSFS,
+    PaginationInfo,
+    PaginationRequest,
     PlatformSpec,
     PVC,
     ResourceLimits,
+    Snapshot,
+    SnapshotFilter,
+    SnapshotStatus,
     Volume,
 )
 
@@ -68,8 +75,30 @@ class TestPVC:
 
     def test_serialization_uses_alias(self):
         backend = PVC(claim_name="my-pvc")
-        data = backend.model_dump(by_alias=True)
-        assert data == {"claimName": "my-pvc"}
+        data = backend.model_dump(by_alias=True, exclude_none=True)
+        assert data == {
+            "claimName": "my-pvc",
+            "createIfNotExists": True,
+            "deleteOnSandboxTermination": False,
+        }
+
+    def test_serialization_with_provisioning_hints(self):
+        """Provisioning hints should serialize with aliases."""
+        backend = PVC(
+            claim_name="my-pvc",
+            storage_class="ssd",
+            storage="5Gi",
+            access_modes=["ReadWriteOnce"],
+        )
+        data = backend.model_dump(by_alias=True, exclude_none=True)
+        assert data == {
+            "claimName": "my-pvc",
+            "createIfNotExists": True,
+            "deleteOnSandboxTermination": False,
+            "storageClass": "ssd",
+            "storage": "5Gi",
+            "accessModes": ["ReadWriteOnce"],
+        }
 
     def test_claim_name_required(self):
         with pytest.raises(ValidationError) as exc_info:
@@ -216,7 +245,11 @@ class TestVolume:
         data = volume.model_dump(by_alias=True, exclude_none=True)
         assert data == {
             "name": "models",
-            "pvc": {"claimName": "shared-models-pvc"},
+            "pvc": {
+                "claimName": "shared-models-pvc",
+                "createIfNotExists": True,
+                "deleteOnSandboxTermination": False,
+            },
             "mountPath": "/mnt/models",
             "readOnly": True,
         }
@@ -236,6 +269,88 @@ class TestVolume:
         assert volume.mount_path == "/mnt/work"
         assert volume.read_only is False
         assert volume.sub_path == "task-001"
+
+
+class TestSnapshots:
+
+    def test_create_snapshot_request_accepts_optional_name(self):
+        request = CreateSnapshotRequest(name="checkpoint-before-import")
+        assert request.name == "checkpoint-before-import"
+
+    def test_snapshot_serialization_uses_aliases(self):
+        snapshot = Snapshot(
+            id="snap-001",
+            sandboxId="sbx-001",
+            name="checkpoint-before-import",
+            status=SnapshotStatus(state="Ready"),
+            createdAt="2026-04-22T00:00:00Z",
+        )
+        data = snapshot.model_dump(by_alias=True, exclude_none=True)
+        assert data["sandboxId"] == "sbx-001"
+        assert data["createdAt"] == snapshot.created_at
+        assert data["status"] == {"state": "Ready"}
+
+    def test_list_snapshots_request_supports_alias_filter(self):
+        request = ListSnapshotsRequest(
+            filter=SnapshotFilter(sandboxId="sbx-001", state=["Ready"]),
+            pagination=PaginationRequest(page=2, pageSize=50),
+        )
+        assert request.filter.sandbox_id == "sbx-001"
+        assert request.pagination is not None
+        assert request.pagination.page_size == 50
+
+    def test_pagination_info_serializes_aliases(self):
+        pagination = PaginationInfo(
+            page=1,
+            pageSize=20,
+            totalItems=3,
+            totalPages=1,
+            hasNextPage=False,
+        )
+        data = pagination.model_dump(by_alias=True)
+        assert data == {
+            "page": 1,
+            "pageSize": 20,
+            "totalItems": 3,
+            "totalPages": 1,
+            "hasNextPage": False,
+        }
+
+
+class TestCreateSandboxRequestSnapshotCompat:
+
+    def test_accepts_snapshot_id_without_entrypoint(self):
+        request = CreateSandboxRequest(
+            snapshotId="snap-001",
+            resourceLimits=ResourceLimits(root={"cpu": "500m"}),
+        )
+        assert request.snapshot_id == "snap-001"
+        assert request.image is None
+        assert request.entrypoint is None
+
+    def test_accepts_snapshot_id_with_entrypoint(self):
+        request = CreateSandboxRequest(
+            snapshotId="snap-001",
+            resourceLimits=ResourceLimits(root={"cpu": "500m"}),
+            entrypoint=["python", "app.py"],
+        )
+        assert request.snapshot_id == "snap-001"
+        assert request.entrypoint == ["python", "app.py"]
+
+    def test_treats_blank_image_uri_as_missing_image(self):
+        request = CreateSandboxRequest(
+            image=ImageSpec(uri="   "),
+            snapshotId="snap-001",
+            resourceLimits=ResourceLimits(root={"cpu": "500m"}),
+        )
+        assert request.image is None
+        assert request.snapshot_id == "snap-001"
+
+    def test_rejects_when_both_image_and_snapshot_missing(self):
+        with pytest.raises(ValidationError):
+            CreateSandboxRequest(
+                resourceLimits=ResourceLimits(root={"cpu": "500m"}),
+            )
 
     def test_deserialization_pvc_volume(self):
         data = {
@@ -288,6 +403,22 @@ class TestCreateSandboxRequestWithVolumes:
             entrypoint=["python", "-c", "print('hello')"],
         )
         assert request.volumes is None
+        assert request.secure_access is False
+
+    def test_request_with_secure_access(self):
+        request = CreateSandboxRequest.model_validate(
+            {
+                "image": {"uri": "python:3.11"},
+                "timeout": 3600,
+                "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
+                "entrypoint": ["python", "-c", "print('hello')"],
+                "secureAccess": True,
+            }
+        )
+        assert request.secure_access is True
+
+        data = request.model_dump(by_alias=True, exclude_none=True)
+        assert data["secureAccess"] is True
 
     def test_request_with_empty_volumes(self):
         request = CreateSandboxRequest(
@@ -468,3 +599,63 @@ class TestCreateSandboxRequestWithVolumes:
         )
 
         assert request.timeout == 172800
+
+
+class TestCreateSandboxRequestPoolMode:
+    """Tests for pool mode (extensions.poolRef) validation."""
+
+    def test_pool_mode_accepts_only_pool_ref(self):
+        """Happy path: poolRef only, no image/entrypoint/resourceLimits required."""
+        request = CreateSandboxRequest(
+            extensions={"poolRef": "my-pool"},
+        )
+        assert request.image is None
+        assert request.entrypoint is None
+        assert request.resource_limits is None
+        assert request.extensions["poolRef"] == "my-pool"
+
+    def test_pool_mode_accepts_pool_ref_with_optional_fields(self):
+        """poolRef with optional env/metadata/timeout should be valid."""
+        request = CreateSandboxRequest(
+            extensions={"poolRef": "my-pool"},
+            env={"KEY": "value"},
+            metadata={"team": "test"},
+            timeout=600,
+        )
+        assert request.extensions["poolRef"] == "my-pool"
+        assert request.env == {"KEY": "value"}
+
+    def test_pool_mode_rejects_snapshot_id_with_pool_ref(self):
+        """snapshotId and poolRef cannot be used together."""
+        with pytest.raises(ValidationError) as exc_info:
+            CreateSandboxRequest(
+                snapshotId="snap-001",
+                extensions={"poolRef": "my-pool"},
+            )
+        errors = exc_info.value.errors()
+        assert any("snapshotId" in str(e) and "poolRef" in str(e) for e in errors)
+
+    def test_resource_limits_required_without_pool_ref(self):
+        """Without poolRef, resourceLimits is still required (image mode)."""
+        with pytest.raises(ValidationError):
+            CreateSandboxRequest(
+                image=ImageSpec(uri="python:3.11"),
+                entrypoint=["python"],
+            )
+
+    def test_pool_mode_normalizes_blank_snapshot_id(self):
+        """Blank snapshotId (e.g. whitespace) should be normalized to None in pool mode."""
+        req = CreateSandboxRequest(
+            extensions={"poolRef": "my-pool"},
+            snapshotId="   ",
+        )
+        assert req.snapshot_id is None
+
+    def test_pool_mode_ignores_blank_pool_ref(self):
+        """Blank poolRef should not trigger pool mode."""
+        with pytest.raises(ValidationError):
+            CreateSandboxRequest(
+                extensions={"poolRef": "   "},
+            )
+
+

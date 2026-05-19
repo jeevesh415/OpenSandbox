@@ -40,6 +40,7 @@ import type {
   RenewSandboxExpirationResponse,
   SandboxId,
   SandboxInfo,
+  SandboxMetadataPatch,
   Volume,
 } from "./models/sandboxes.js";
 import { SandboxReadyTimeoutException } from "./core/exceptions.js";
@@ -59,9 +60,14 @@ export interface SandboxCreateOptions {
   /**
    * Container image uri, e.g. `python:3.11`
    */
-  image:
+  image?:
     | string
     | { uri: string; auth?: { username: string; password: string } };
+  /**
+   * Snapshot identifier to restore from.
+   * Mutually exclusive with `image`.
+   */
+  snapshotId?: string;
 
   /**
    * Entrypoint command for the sandbox (defaults to tail -f /dev/null).
@@ -93,6 +99,10 @@ export interface SandboxCreateOptions {
    * Optional runtime platform constraint used for provisioning.
    */
   platform?: PlatformSpec;
+  /**
+   * Whether to enable secured access for sandbox endpoints.
+   */
+  secureAccess?: boolean;
 
   /**
    * Resource limits applied to the sandbox container.
@@ -160,8 +170,8 @@ function sleep(ms: number): Promise<void> {
 }
 
 function toImageSpec(
-  image: SandboxCreateOptions["image"]
-): CreateSandboxRequest["image"] {
+  image: NonNullable<SandboxCreateOptions["image"]>
+): NonNullable<CreateSandboxRequest["image"]> {
   if (typeof image === "string") return { uri: image };
   return { uri: image.uri, auth: image.auth };
 }
@@ -231,6 +241,10 @@ export class Sandbox {
   }
 
   static async create(opts: SandboxCreateOptions): Promise<Sandbox> {
+    if ((opts.image == null) === (opts.snapshotId == null)) {
+      throw new Error("Exactly one of image or snapshotId must be provided");
+    }
+
     // Validate volumes before allocating transport resources.
     if (opts.volumes) {
       for (const vol of opts.volumes) {
@@ -284,9 +298,11 @@ export class Sandbox {
     }
 
     const req: CreateSandboxRequest = {
-      image: toImageSpec(opts.image),
+      image: opts.image == null ? undefined : toImageSpec(opts.image),
+      snapshotId: opts.snapshotId,
       entrypoint: opts.entrypoint ?? DEFAULT_ENTRYPOINT,
       resourceLimits: opts.resource ?? DEFAULT_RESOURCE_LIMITS,
+      secureAccess: opts.secureAccess ?? false,
       env: opts.env ?? {},
       metadata: opts.metadata ?? {},
       networkPolicy: opts.networkPolicy
@@ -542,6 +558,10 @@ export class Sandbox {
     return await this.sandboxes.renewSandboxExpiration(this.id, { expiresAt });
   }
 
+  async patchMetadata(patch: SandboxMetadataPatch): Promise<SandboxInfo> {
+    return await this.sandboxes.patchSandboxMetadata(this.id, patch);
+  }
+
   async getEgressPolicy(): Promise<NetworkPolicy> {
     return await Sandbox._priv.get(this)!.egress.getPolicy();
   }
@@ -559,6 +579,13 @@ export class Sandbox {
       port,
       this.connectionConfig.useServerProxy
     );
+  }
+
+  /**
+   * Get signed endpoint URL with an OSEP-0011 route token that expires at the given Unix epoch timestamp (seconds).
+   */
+  async getSignedEndpoint(port: number, expires: number): Promise<Endpoint> {
+    return await this.sandboxes.getSignedEndpoint(this.id, port, expires);
   }
 
   /**

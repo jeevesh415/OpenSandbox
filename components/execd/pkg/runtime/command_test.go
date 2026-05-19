@@ -42,7 +42,7 @@ func TestReadFromPos_SplitsOnCRAndLF(t *testing.T) {
 
 	var got []string
 	c := &Controller{}
-	nextPos := c.readFromPos(mutex, logFile, 0, func(s string) { got = append(got, s) }, false)
+	nextPos := c.readFromPos(mutex, logFile, 0, func(s string) { got = append(got, s) }, false, nil)
 
 	want := []string{"line1", "prog 10%", "prog 20%", "prog 30%", "last"}
 	require.Len(t, got, len(want))
@@ -59,7 +59,7 @@ func TestReadFromPos_SplitsOnCRAndLF(t *testing.T) {
 	_ = f.Close()
 
 	got = got[:0]
-	c.readFromPos(mutex, logFile, nextPos, func(s string) { got = append(got, s) }, false)
+	c.readFromPos(mutex, logFile, nextPos, func(s string) { got = append(got, s) }, false, nil)
 	want = []string{"tail1", "tail2"}
 	require.Len(t, got, len(want))
 	for i := range want {
@@ -77,7 +77,7 @@ func TestReadFromPos_LongLine(t *testing.T) {
 
 	var got []string
 	c := &Controller{}
-	c.readFromPos(&sync.Mutex{}, logFile, 0, func(s string) { got = append(got, s) }, false)
+	c.readFromPos(&sync.Mutex{}, logFile, 0, func(s string) { got = append(got, s) }, false, nil)
 
 	require.Len(t, got, 1, "expected one token")
 	require.Equal(t, strings.TrimSuffix(longLine, "\n"), got[0], "long line mismatch")
@@ -98,13 +98,84 @@ func TestReadFromPos_FlushesTrailingLine(t *testing.T) {
 	}
 
 	// First read: should only get complete lines with newlines
-	pos := c.readFromPos(mutex, file, 0, onExecute, false)
+	pos := c.readFromPos(mutex, file, 0, onExecute, false, nil)
 	assert.GreaterOrEqual(t, pos, int64(0))
 	assert.Equal(t, []string{"line1"}, lines)
 
 	// Flush at end: should output the last line (without newline)
-	c.readFromPos(mutex, file, pos, onExecute, true)
+	c.readFromPos(mutex, file, pos, onExecute, true, nil)
 	assert.Equal(t, []string{"line1", "lastline-without-newline"}, lines)
+}
+
+func TestReadFromPos_PreservesBlankLines(t *testing.T) {
+	tmp := t.TempDir()
+	logFile := filepath.Join(tmp, "stdout.log")
+
+	// Mix of single newlines, consecutive blank lines, leading blank, and CRLF.
+	initial := "a\n\nb\n\n\nc\n\r\nd\n"
+	require.NoError(t, os.WriteFile(logFile, []byte(initial), 0o644))
+
+	var got []string
+	c := &Controller{}
+	c.readFromPos(&sync.Mutex{}, logFile, 0, func(s string) { got = append(got, s) }, false, nil)
+
+	want := []string{"a", "\n", "b", "\n", "\n", "c", "\n", "d"}
+	require.Equal(t, want, got)
+}
+
+// TestReadFromPos_CRLFAcrossPolls ensures a \r\n pair that arrives in two
+// successive polls does not emit a spurious blank line for the trailing \n.
+// Reproduces the regression on Windows/cmd writers that flush \r before \n.
+func TestReadFromPos_CRLFAcrossPolls(t *testing.T) {
+	tmp := t.TempDir()
+	logFile := filepath.Join(tmp, "stdout.log")
+
+	require.NoError(t, os.WriteFile(logFile, []byte("a\r"), 0o644))
+
+	var got []string
+	c := &Controller{}
+	mutex := &sync.Mutex{}
+	var lastWasCR bool
+	pos := c.readFromPos(mutex, logFile, 0, func(s string) { got = append(got, s) }, false, &lastWasCR)
+	require.Equal(t, []string{"a"}, got)
+	require.True(t, lastWasCR, "CR state must persist for next poll")
+
+	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_WRONLY, 0o644)
+	require.NoError(t, err)
+	_, err = f.WriteString("\nb\n")
+	require.NoError(t, err)
+	_ = f.Close()
+
+	got = got[:0]
+	c.readFromPos(mutex, logFile, pos, func(s string) { got = append(got, s) }, false, &lastWasCR)
+	require.Equal(t, []string{"b"}, got, "trailing \\n of split CRLF must not emit a blank line")
+}
+
+// TestReadFromPos_BlankCRLFAcrossPolls ensures a blank \r\n line split across
+// polls is emitted as a single blank, not duplicated.
+func TestReadFromPos_BlankCRLFAcrossPolls(t *testing.T) {
+	tmp := t.TempDir()
+	logFile := filepath.Join(tmp, "stdout.log")
+
+	require.NoError(t, os.WriteFile(logFile, []byte("\r"), 0o644))
+
+	var got []string
+	c := &Controller{}
+	mutex := &sync.Mutex{}
+	var lastWasCR bool
+	pos := c.readFromPos(mutex, logFile, 0, func(s string) { got = append(got, s) }, false, &lastWasCR)
+	require.Equal(t, []string{"\n"}, got)
+	require.True(t, lastWasCR)
+
+	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_WRONLY, 0o644)
+	require.NoError(t, err)
+	_, err = f.WriteString("\n")
+	require.NoError(t, err)
+	_ = f.Close()
+
+	got = got[:0]
+	c.readFromPos(mutex, logFile, pos, func(s string) { got = append(got, s) }, false, &lastWasCR)
+	require.Empty(t, got, "trailing \\n of split blank CRLF must not emit a second blank")
 }
 
 func TestRunCommand_Echo(t *testing.T) {
@@ -214,6 +285,127 @@ func TestRunCommand_Error(t *testing.T) {
 	require.NotNil(t, gotErr, "expected error hook to be called")
 	require.Equal(t, "CommandExecError", gotErr.EName)
 	require.Equal(t, "3", gotErr.EValue)
+}
+
+func TestRunCommand_ExpandsHomeInCwd(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("bash not available on windows")
+	}
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not found in PATH")
+	}
+
+	home := t.TempDir()
+	target := filepath.Join(home, "workspace")
+	require.NoError(t, os.MkdirAll(target, 0o755))
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	c := NewController("", "")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var stdoutLines []string
+	req := &ExecuteCodeRequest{
+		Code:    `pwd`,
+		Cwd:     "~/workspace",
+		Timeout: 5 * time.Second,
+		Hooks: ExecuteResultHook{
+			OnExecuteInit:   func(_ string) {},
+			OnExecuteStdout: func(s string) { stdoutLines = append(stdoutLines, s) },
+			OnExecuteStderr: func(_ string) {},
+			OnExecuteError: func(err *execute.ErrorOutput) {
+				require.Failf(t, "unexpected error hook", "%+v", err)
+			},
+			OnExecuteComplete: func(_ time.Duration) {},
+		},
+	}
+
+	require.NoError(t, c.runCommand(ctx, req))
+
+	targetRealPath, err := filepath.EvalSymlinks(target)
+	require.NoError(t, err)
+	targetRealPath = filepath.Clean(targetRealPath)
+
+	found := false
+	for _, line := range stdoutLines {
+		p := strings.TrimSpace(line)
+		if p == "" {
+			continue
+		}
+		pRealPath, err := filepath.EvalSymlinks(p)
+		if err != nil {
+			continue
+		}
+		if filepath.Clean(pRealPath) == targetRealPath {
+			found = true
+			break
+		}
+	}
+	require.True(t, found, "pwd output does not match expected cwd; got=%v target=%s", stdoutLines, target)
+}
+
+func TestRunCommand_ExpandsCwdFromRequestEnvWithHigherPriority(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("bash not available on windows")
+	}
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not found in PATH")
+	}
+
+	processDir := t.TempDir()
+	requestDir := t.TempDir()
+	t.Setenv("WORKDIR", processDir)
+
+	c := NewController("", "")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var (
+		stdoutLines []string
+		gotErr      *execute.ErrorOutput
+	)
+	req := &ExecuteCodeRequest{
+		Code:    `pwd`,
+		Cwd:     `$WORKDIR`,
+		Timeout: 5 * time.Second,
+		Envs: map[string]string{
+			"WORKDIR": requestDir,
+		},
+		Hooks: ExecuteResultHook{
+			OnExecuteInit:   func(_ string) {},
+			OnExecuteStdout: func(s string) { stdoutLines = append(stdoutLines, s) },
+			OnExecuteStderr: func(_ string) {},
+			OnExecuteError: func(err *execute.ErrorOutput) {
+				gotErr = err
+			},
+			OnExecuteComplete: func(_ time.Duration) {},
+		},
+	}
+
+	require.NoError(t, c.runCommand(ctx, req))
+	require.Nil(t, gotErr, "expected cwd expansion to use request env")
+
+	requestRealPath, err := filepath.EvalSymlinks(requestDir)
+	require.NoError(t, err)
+	requestRealPath = filepath.Clean(requestRealPath)
+
+	found := false
+	for _, line := range stdoutLines {
+		p := strings.TrimSpace(line)
+		if p == "" {
+			continue
+		}
+		pRealPath, err := filepath.EvalSymlinks(p)
+		if err != nil {
+			continue
+		}
+		if filepath.Clean(pRealPath) == requestRealPath {
+			found = true
+			break
+		}
+	}
+	require.True(t, found, "pwd output does not match request env cwd; got=%v requestDir=%s", stdoutLines, requestDir)
 }
 
 func TestRunCommand_StartErrorIncludesTraceback(t *testing.T) {

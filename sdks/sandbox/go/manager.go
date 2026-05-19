@@ -42,6 +42,11 @@ func (m *SandboxManager) GetSandboxInfo(ctx context.Context, sandboxID string) (
 	return m.lifecycle.GetSandbox(ctx, sandboxID)
 }
 
+// PatchSandboxMetadata patches metadata for a sandbox by ID.
+func (m *SandboxManager) PatchSandboxMetadata(ctx context.Context, sandboxID string, patch MetadataPatch) (*SandboxInfo, error) {
+	return m.lifecycle.PatchSandboxMetadata(ctx, sandboxID, patch)
+}
+
 // KillSandbox terminates a sandbox by ID.
 func (m *SandboxManager) KillSandbox(ctx context.Context, sandboxID string) error {
 	return m.lifecycle.DeleteSandbox(ctx, sandboxID)
@@ -62,5 +67,25 @@ func (m *SandboxManager) RenewSandbox(ctx context.Context, sandboxID string, dur
 	return m.lifecycle.RenewExpiration(ctx, sandboxID, time.Now().Add(duration))
 }
 
+// CreateSnapshot creates a snapshot for the given sandbox.
+func (m *SandboxManager) CreateSnapshot(ctx context.Context, sandboxID string, req CreateSnapshotRequest) (*SnapshotInfo, error) {
+	return m.lifecycle.CreateSnapshot(ctx, sandboxID, req)
+}
+
+// GetSnapshot retrieves snapshot info by ID.
+func (m *SandboxManager) GetSnapshot(ctx context.Context, snapshotID string) (*SnapshotInfo, error) {
+	return m.lifecycle.GetSnapshot(ctx, snapshotID)
+}
+
+// ListSnapshots returns a paginated list of snapshots with optional filtering.
+func (m *SandboxManager) ListSnapshots(ctx context.Context, filter ListSnapshotsOptions) (*ListSnapshotsResponse, error) {
+	return m.lifecycle.ListSnapshots(ctx, filter)
+}
+
+// DeleteSnapshot deletes a snapshot by ID.
+func (m *SandboxManager) DeleteSnapshot(ctx context.Context, snapshotID string) error {
+	return m.lifecycle.DeleteSnapshot(ctx, snapshotID)
+}
+
 // Close releases local resources. Currently a no-op placeholder.
-func (m *SandboxManager) Close() {}
+func (m *SandboxManager) Close() error { return nil }

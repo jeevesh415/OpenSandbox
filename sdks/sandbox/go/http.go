@@ -88,17 +88,30 @@ func NewClient(baseURL, apiKey, authHeader string, opts ...Option) *Client {
 		baseURL:    baseURL,
 		apiKey:     apiKey,
 		authHeader: authHeader,
-		httpClient: &http.Client{Timeout: defaultTimeout},
+		httpClient: &http.Client{
+			Timeout:   defaultTimeout,
+			Transport: DefaultTransport(),
+		},
 	}
 	for _, opt := range opts {
 		opt(c)
 	}
+	if c.httpClient == nil {
+		c.httpClient = &http.Client{
+			Timeout:   defaultTimeout,
+			Transport: DefaultTransport(),
+		}
+	} else if c.httpClient.Transport == nil {
+		// Clone the caller's client to avoid mutating shared instances
+		// (e.g. http.DefaultClient) which would leak the SDK's transport
+		// settings into unrelated traffic in the same process.
+		cloned := *c.httpClient
+		cloned.Transport = DefaultTransport()
+		c.httpClient = &cloned
+	}
 	// Apply deferred timeout after all options so it works regardless of
 	// WithHTTPClient ordering and guards against a nil httpClient.
 	if c.timeout != nil {
-		if c.httpClient == nil {
-			c.httpClient = &http.Client{}
-		}
 		c.httpClient.Timeout = *c.timeout
 	}
 	return c
@@ -130,6 +143,7 @@ func (c *Client) doRequestOnce(ctx context.Context, method, path string, body an
 		return fmt.Errorf("opensandbox: create request: %w", err)
 	}
 
+	req.Header.Set("User-Agent", "OpenSandbox-Go-SDK/"+Version)
 	for k, v := range c.headers {
 		req.Header.Set(k, v)
 	}
@@ -153,12 +167,14 @@ func (c *Client) doRequestOnce(ctx context.Context, method, path string, body an
 
 	// No content (e.g. 204)
 	if resp.StatusCode == http.StatusNoContent || result == nil {
+		io.Copy(io.Discard, resp.Body)
 		return nil
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
 		return fmt.Errorf("opensandbox: decode response: %w", err)
 	}
+	io.Copy(io.Discard, resp.Body)
 	return nil
 }
 
@@ -184,6 +200,7 @@ func (c *Client) doStreamRequest(ctx context.Context, method, path string, body 
 			return fmt.Errorf("opensandbox: create request: %w", err)
 		}
 
+		req.Header.Set("User-Agent", "OpenSandbox-Go-SDK/"+Version)
 		for k, v := range c.headers {
 			req.Header.Set(k, v)
 		}

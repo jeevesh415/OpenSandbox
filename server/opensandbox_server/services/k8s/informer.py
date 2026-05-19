@@ -16,7 +16,7 @@
 
 import logging
 import threading
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from kubernetes import watch
 from kubernetes.client import ApiException
@@ -85,6 +85,11 @@ class WorkloadInformer:
         with self._lock:
             return self._cache.get(name)
 
+    def list(self) -> List[Dict[str, Any]]:
+        """Return a snapshot of every cached object."""
+        with self._lock:
+            return list(self._cache.values())
+
     def update_cache(self, obj: Dict[str, Any]) -> None:
         """Upsert a single object into the cache.
 
@@ -99,6 +104,11 @@ class WorkloadInformer:
         with self._lock:
             self._cache[name] = obj
             self._advance_resource_version(metadata.get("resourceVersion"))
+
+    def delete_from_cache(self, name: str) -> None:
+        """Evict a single object from the cache by name."""
+        with self._lock:
+            self._cache.pop(name, None)
 
     def _advance_resource_version(self, rv: Optional[str]) -> None:
         """Advance ``_resource_version`` only when *rv* is strictly newer.
@@ -142,12 +152,12 @@ class WorkloadInformer:
                     self._resource_version = None
                     self._has_synced = False
                 else:
-                    logger.warning("Informer watch error: %s", exc, exc_info=True)
+                    logger.warning(f"Informer watch error: {exc}", exc_info=True)
                     self._has_synced = False
                     self._stop_event.wait(min(backoff, 30.0))
                     backoff = min(backoff * 2, 30.0)
             except Exception as exc:  # pragma: no cover - defensive
-                logger.warning("Unexpected informer error: %s", exc, exc_info=True)
+                logger.warning(f"Unexpected informer error: {exc}", exc_info=True)
                 self._has_synced = False
                 self._stop_event.wait(min(backoff, 30.0))
                 backoff = min(backoff * 2, 30.0)

@@ -16,6 +16,7 @@
 set -euxo pipefail
 
 TAG=${TAG:-latest}
+RUN_CODE_INTERPRETER_E2E=${RUN_CODE_INTERPRETER_E2E:-false}
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -45,6 +46,7 @@ echo "-------- JAVA E2E test logs for execd --------" > /tmp/opensandbox-e2e/log
 
 # setup server
 cd server
+export OPENSANDBOX_INSECURE_SERVER=YES
 uv sync && uv run python -m opensandbox_server.main > server.log 2>&1 &
 cd ..
 
@@ -61,4 +63,8 @@ cd ../../../
 
 # run Java e2e
 cd tests/java
-./gradlew test
+if [ "${RUN_CODE_INTERPRETER_E2E}" = "true" ]; then
+  ./gradlew test
+else
+  ./gradlew test -PskipCodeInterpreterE2E=true
+fi

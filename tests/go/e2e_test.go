@@ -53,7 +53,7 @@ func TestE2E_FullLifecycle(t *testing.T) {
 
 	// 2. Create a sandbox
 	sb, err := client.CreateSandbox(ctx, opensandbox.CreateSandboxRequest{
-		Image: opensandbox.ImageSpec{
+		Image: &opensandbox.ImageSpec{
 			URI: getDefaultImage(),
 		},
 		Entrypoint: []string{"tail", "-f", "/dev/null"},
@@ -61,6 +61,7 @@ func TestE2E_FullLifecycle(t *testing.T) {
 			"cpu":    "500m",
 			"memory": "256Mi",
 		},
+		Env: map[string]string{"EXECD_API_GRACE_SHUTDOWN": "3s", "EXECD_JUPYTER_IDLE_POLL_INTERVAL": "200ms"},
 		Metadata: map[string]string{
 			"test": "go-e2e",
 		},
@@ -116,8 +117,16 @@ func TestE2E_FullLifecycle(t *testing.T) {
 	}
 	execClient := opensandbox.NewExecdClient(execdURL, execToken)
 
-	err = execClient.Ping(ctx)
-	require.NoError(t, err)
+	// This test bypasses the SDK's high-level CreateSandbox helper (which calls
+	// WaitUntilReady) and pings execd directly through the server-side proxy.
+	// The state-Running flag is satisfied as soon as the container is up, but
+	// execd's HTTP routes may register a few ms later and the proxy can drop
+	// the very first connection it sees ("connection reset by peer"). Poll
+	// until ping succeeds — real users go through CreateSandbox which already
+	// handles this.
+	require.Eventually(t, func() bool {
+		return execClient.Ping(ctx) == nil
+	}, 30*time.Second, 500*time.Millisecond, "execd ping never succeeded")
 	t.Log("Execd ping: OK")
 
 	// 6. Test Execd — run a command with SSE streaming
@@ -130,7 +139,6 @@ func TestE2E_FullLifecycle(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
-	t.Logf("Command raw output (%d bytes): %q", output.Len(), output.String())
 
 	// 7. Test Execd — file operations
 	fileInfoMap, err := execClient.GetFileInfo(ctx, "/etc/os-release")
@@ -200,6 +208,7 @@ func TestE2E_PauseResume(t *testing.T) {
 	// 1. Create sandbox via high-level API
 	sb, err := opensandbox.CreateSandbox(ctx, config, opensandbox.SandboxCreateOptions{
 		Image:    getDefaultImage(),
+		Env:      map[string]string{"EXECD_API_GRACE_SHUTDOWN": "3s", "EXECD_JUPYTER_IDLE_POLL_INTERVAL": "200ms"},
 		Metadata: map[string]string{"test": "go-e2e-pause-resume"},
 	})
 	require.NoError(t, err)
@@ -266,6 +275,7 @@ func TestE2E_ManualCleanup(t *testing.T) {
 	// 1. Create sandbox with ManualCleanup (no auto-expiration)
 	sb, err := opensandbox.CreateSandbox(ctx, config, opensandbox.SandboxCreateOptions{
 		Image:         getDefaultImage(),
+		Env:           map[string]string{"EXECD_API_GRACE_SHUTDOWN": "3s", "EXECD_JUPYTER_IDLE_POLL_INTERVAL": "200ms"},
 		ManualCleanup: true,
 		Metadata:      map[string]string{"test": "go-e2e-manual-cleanup"},
 	})
@@ -290,6 +300,7 @@ func TestE2E_ManualCleanup(t *testing.T) {
 	// 4. Compare with a normal sandbox that should have an expiration
 	sbWithTimeout, err := opensandbox.CreateSandbox(ctx, config, opensandbox.SandboxCreateOptions{
 		Image:    getDefaultImage(),
+		Env:      map[string]string{"EXECD_API_GRACE_SHUTDOWN": "3s", "EXECD_JUPYTER_IDLE_POLL_INTERVAL": "200ms"},
 		Metadata: map[string]string{"test": "go-e2e-with-timeout"},
 	})
 	require.NoError(t, err)

@@ -62,6 +62,7 @@ opensandbox-server init-config ~/.sandbox.toml --example docker
 2. Edit the file for your environment. **Full reference:** **[configuration.md](configuration.md)** (all keys, defaults, validation, env vars).
 
    Topics covered there include: Docker **`network_mode`** / **`host_ip`** (e.g. server in Docker Compose), **`[egress]`** when clients send **`networkPolicy`**, **`[ingress]`**, **`[secure_runtime]`**, Kubernetes **`workload_provider`** / **`batchsandbox_template_file`**, **`[agent_sandbox]`**, TTL caps, **`[renew_intent]`**.
+   The server-wide persistence backend is configured under **`[store]`**; by default OpenSandbox uses a local SQLite database at `~/.opensandbox/opensandbox.db` for server-managed metadata such as snapshot records.
 
 **Also useful:** [Secure container runtime](../docs/secure-container.md) · [Manual cleanup / optional fields](../docs/manual-cleanup-refactor-guide.md) · [Egress component](../components/egress/README.md) · [`docker-compose.example.yaml`](docker-compose.example.yaml) · [Experimental features](#experimental-features)
 
@@ -92,7 +93,9 @@ Once the server is running, interactive API documentation is available:
 
 ### API authentication
 
-Authentication is enforced only when `server.api_key` is set. If the value is empty or missing, the middleware skips API Key checks (intended for local/dev). For production, always set a non-empty `server.api_key` and send it via the `OPEN-SANDBOX-API-KEY` header.
+Authentication is enforced only when `server.api_key` is set. If the value is empty or missing, the middleware skips API Key checks; however startup requires explicit risk acknowledgment. In interactive TTY mode, type `YES` when prompted. In non-interactive environments (Docker/Kubernetes/CI), set `OPENSANDBOX_INSECURE_SERVER=YES` to proceed. For production, always set a non-empty `server.api_key` and send it via the `OPEN-SANDBOX-API-KEY` header.
+
+**Strongly recommend enabling `server.api_key`; see security report [Issue #750](https://github.com/alibaba/OpenSandbox/issues/750)**.
 
 All API endpoints (except `/health`, `/docs`, `/redoc`) require authentication via the `OPEN-SANDBOX-API-KEY` header when authentication is enabled:
 
@@ -153,7 +156,11 @@ Response:
 }
 ```
 
-**Other lifecycle calls** (same `OPEN-SANDBOX-API-KEY` header): `GET /v1/sandboxes/{id}`, `GET /v1/sandboxes/{id}/endpoints/{port}` (append `?use_server_proxy=true` when needed), `POST .../renew-expiration`, `DELETE /v1/sandboxes/{id}`. Full request/response shapes: **Swagger UI** above or OpenAPI under [`specs/`](../specs/).
+**Other lifecycle calls** (same `OPEN-SANDBOX-API-KEY` header): `GET /v1/sandboxes/{id}`, `POST /v1/sandboxes/{id}/pause`, `POST /v1/sandboxes/{id}/resume`, `GET /v1/sandboxes/{id}/endpoints/{port}` (append `?use_server_proxy=true` when needed), `POST .../renew-expiration`, `DELETE /v1/sandboxes/{id}`. Full request/response shapes: **Swagger UI** above or OpenAPI under [`specs/`](../specs/).
+
+For Kubernetes-backed sandboxes, pause/resume is implemented via `BatchSandbox.spec.pause` and internal `SandboxSnapshot` resources. The externally visible lifecycle transitions are `Running -> Pausing -> Paused -> Resuming -> Running`. Operational details are documented in [docs/pause-resume.md](../docs/pause-resume.md).
+
+`secureAccess` currently applies only to **Kubernetes** sandboxes exposed through **ingress gateway mode**. Direct endpoint exposure, including non-gateway ingress configurations, is not supported for secured access.
 
 ## Architecture
 
@@ -180,13 +187,19 @@ Response:
      ┌─────────┐    pause()         │
      │ Running │───────────────┐    │
      └────┬────┘               │    │
-          │      resume()      │    │
-          │   ┌────────────────┘    │
-          │   │                     │
-          │   ▼                     │
-          │ ┌────────┐              │
-          ├─│ Paused │              │
-          │ └────────┘              │
+          │                    │    │
+          │   resume()         │    │
+          │   ┌──────────────┐ │    │
+          │   │              │ │    │
+          │   ▼              │ │    │
+          │ ┌────────┐       │ │    │
+          ├─│ Paused │───────┘ │    │
+          │ └────┬───┘         │    │
+          │      │             │    │
+          │      ▼             │    │
+          │  ┌──────────┐      │    │
+          │  │ Resuming │──────┘    │
+          │  └──────────┘           │
           │                         │
           │ delete() or expire()    │
           ▼                         │
@@ -208,11 +221,11 @@ Single source of truth for TOML: **[configuration.md](configuration.md)** (inclu
 
 ## Experimental features
 
-Optional **🧪 experimental** behavior; **off by default** in [`example.config.toml`](example.config.toml) (and mirrored copies under `opensandbox_server/examples/`). See release notes before production.
+Optional **🧪 experimental** behavior; **off by default** in [`example.config.toml`](opensandbox_server/examples/example.config.toml). See release notes before production.
 
 ### Auto-renew on access
 
-Extends sandbox TTL when traffic is observed (lifecycle **proxy** and/or **ingress** + optional **Redis** queue). Design and operations: **[OSEP-0009](../oseps/0009-auto-renew-sandbox-on-ingress-access.md)**. TOML keys (`[renew_intent]`, including nested `redis.*`): see **[configuration.md](configuration.md)** and [`example.config.toml`](example.config.toml).
+Extends sandbox TTL when traffic is observed (lifecycle **proxy** and/or **ingress** + optional **Redis** queue). Design and operations: **[OSEP-0009](../oseps/0009-auto-renew-sandbox-on-ingress-access.md)**. TOML keys (`[renew_intent]`, including nested `redis.*`): see **[configuration.md](configuration.md)** and [`example.config.toml`](opensandbox_server/examples/example.config.toml).
 
 Per-sandbox: on **create**, set `extensions["access.renew.extend.seconds"]` (string integer **300**–**86400**). Clients using the server proxy: request endpoints with `use_server_proxy=true` (REST) or SDK `ConnectionConfig(..., use_server_proxy=True)` — details in OSEP-0009.
 
@@ -244,7 +257,7 @@ uv run pytest
 
 **Run with coverage**:
 ```bash
-uv run pytest --cov=opensandbox_server --cov-report=html
+uv run pytest --cov=opensandbox_server --cov-report=term --cov-fail-under=80
 ```
 
 **Run specific test**:
